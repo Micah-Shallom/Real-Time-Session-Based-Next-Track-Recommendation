@@ -1,0 +1,2 @@
+python src/data/preprocessing/spotify_processor.py --json-file data/raw/spotify_dataset.json
+docker exec -it music-kafka /bin/kafka-topics --create --topic user-tracks --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
