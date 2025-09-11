@@ -95,40 +95,40 @@ services:
           cpus: '0.5'
 
   spark:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile
     container_name: music-spark
     environment:
       - SPARK_MODE=standalone
       - SPARK_MASTER_URL=local[*]
-      - SPARK_DRIVER_MEMORY=1g
-      - SPARK_EXECUTOR_MEMORY=1g
+      - SPARK_DRIVER_MEMORY=2g
+      - SPARK_EXECUTOR_MEMORY=2g
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
       - PYSPARK_PYTHON=/opt/bitnami/python/bin/python
     ports:
-      - "4040:4040"  # Spark Application Web UI
-      - "4041:4041"  # Secondary Spark UI port
+      - "4040:4040"
+      - "4041:4041"
     volumes:
       - ./:/app
       - ./spark-logs:/tmp/spark-logs
       - ./checkpoints:/tmp/checkpoints
+      - ./log4j.properties:/opt/bitnami/spark/conf/log4j.properties  # Add this line
     command: >
-      bash -c "/opt/bitnami/spark/bin/spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.mongodb.spark:mongo-spark-connector_2.12:3.0.1 /app/src/processing/spark/streaming_processor.py --kafka-servers kafka:29092 --kafka-topic user-tracks --mongo-uri mongodb://admin:password@mongodb:27017 --mongo-db recommendations --mongo-collection user_tracks"
-
+      bash -c "/opt/bitnami/spark/bin/spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.mongodb.spark:mongo-spark-connector_2.12:3.0.1 /app/src/processing/spark/streaming_processor.py --kafka-servers kafka:29092 --kafka-topic user-tracks --mongo-uri mongodb://admin:password@mongodb:27017 --mongo-db recommendations --mongo-collection user_sessions --checkpoint-location /tmp/checkpoints"
     networks:
       - music-network
     deploy:
       resources:
         limits:
+          memory: 4G
+          cpus: '4'
+        reservations:
           memory: 2G
           cpus: '2'
-        reservations:
-          memory: 1G
-          cpus: '1'
     healthcheck:
       test: ["CMD-SHELL", "netstat -tuln | grep 4040"]
       interval: 30s

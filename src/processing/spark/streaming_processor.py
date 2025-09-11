@@ -21,8 +21,11 @@ from pyspark.sql.types import (
 from pymongo import MongoClient
 import argparse
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+# Setup logging with more detailed format
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 class SimpleMusicRecommender:
@@ -51,19 +54,25 @@ class SimpleMusicRecommender:
         self.spark = self._create_spark_session()
         self.mongo_client = None
         
-        logger.info("Simplified recommender initialized")
+        logger.info("Simplified recommender initialized with kafka_servers=%s, topic=%s, mongo_uri=%s", 
+                    kafka_servers, kafka_topic, mongo_uri)
     
     def _create_spark_session(self) -> SparkSession:
-        """Create minimal Spark session"""
-        return SparkSession.builder \
+        """Create minimal Spark session with reduced logging"""
+        spark = SparkSession.builder \
             .appName("SimpleMusicRecommender") \
             .config("spark.sql.adaptive.enabled", "true") \
             .config("spark.streaming.stopGracefullyOnShutdown", "true") \
-            .getOrCreate()
+            .config("spark.driver.memory", "2g") \
+            .config("spark.executor.memory", "2g") \
+            .config("spark.log.level", "WARN").getOrCreate()
+        spark.sparkContext.setLogLevel("WARN")  # Change from DEBUG to WARN
+        logger.info("Spark session created with appName=SimpleMusicRecommender")
+        return spark
     
     def _get_schema(self) -> StructType:
         """Simple event schema"""
-        return StructType([
+        schema = StructType([
             StructField("user_id", StringType(), True),
             StructField("track_id", StringType(), True),
             StructField("session_id", StringType(), True),
@@ -72,10 +81,12 @@ class SimpleMusicRecommender:
             StructField("artist", StringType(), True),
             StructField("song_title", StringType(), True)
         ])
+        logger.info("Defined schema: %s", schema.json())
+        return schema
     
     def _create_stream(self):
         """Create simple Kafka stream"""
-        return self.spark \
+        kafka_stream = self.spark \
             .readStream \
             .format("kafka") \
             .option("kafka.bootstrap.servers", self.kafka_servers) \
@@ -83,6 +94,8 @@ class SimpleMusicRecommender:
             .option("startingOffsets", "latest") \
             .option("failOnDataLoss", "false") \
             .load()
+        logger.info("Created Kafka stream for topic=%s, servers=%s", self.kafka_topic, self.kafka_servers)
+        return kafka_stream
     
     def _process_events(self, kafka_df):
         """Simple event processing without complex UDFs"""
@@ -93,11 +106,38 @@ class SimpleMusicRecommender:
             from_json(col("value").cast("string"), schema).alias("data")
         ).select("data.*")
         
-        # Convert timestamp
+        # Log event count and sample events
+        def log_events(batch_df, batch_id):
+            event_count = batch_df.count()
+            logger.info("Batch %s: Consumed %d events from Kafka", batch_id, event_count)
+            if event_count > 0:
+                sample_events = batch_df.limit(3).collect()  # Log up to 3 events
+                for i, event in enumerate(sample_events, 1):
+                    logger.info("Batch %s: Sample event %d: user_id=%s, track_id=%s, session_id=%s, event_type=%s, artist=%s, song_title=%s, timestamp=%s", 
+                                 batch_id, i, event.user_id, event.track_id, event.session_id, 
+                                 event.event_type, event.artist, event.song_title, event.timestamp)
+        
+        # Apply logging to each micro-batch
+        events.writeStream \
+            .foreachBatch(log_events) \
+            .trigger(processingTime='10 seconds') \
+            .start()  # Start a separate query for logging
+        
+        # Convert timestamp and filter
         events = events.withColumn(
             "event_time",
             to_timestamp(col("timestamp"), "yyyy-MM-dd'T'HH:mm:ss.SSSSSS")
         ).filter(col("event_time").isNotNull() & (col("event_type") == "play"))
+        
+        # Log filtered events
+        def log_filtered_events(batch_df, batch_id):
+            filtered_count = batch_df.count()
+            logger.info("Batch %s: Processed %d play events after filtering", batch_id, filtered_count)
+        
+        events.writeStream \
+            .foreachBatch(log_filtered_events) \
+            .trigger(processingTime='10 seconds') \
+            .start()  # Start a separate query for logging filtered events
         
         # Simple session aggregation - no complex recommendations
         sessions = events \
@@ -118,43 +158,23 @@ class SimpleMusicRecommender:
                 when(col("track_count") > 1, True).otherwise(False)
             )
         
+        logger.info("Completed event processing setup")
         return sessions
     
     def _write_to_mongo(self, df, epoch_id):
-        """Simple MongoDB writer"""
+        """Simple MongoDB writer using native Spark connector"""
         try:
-            pandas_df = df.toPandas()
-            
-            if pandas_df.empty:
-                logger.info(f"Epoch {epoch_id}: No data")
+            if df.isEmpty():
+                logger.info(f"Epoch {epoch_id}: No data to write to MongoDB")
                 return
             
-            if not self.mongo_client:
-                self.mongo_client = MongoClient(self.mongo_uri)
-            
-            db = self.mongo_client[self.mongo_db]
-            collection = db[self.mongo_collection]
-            
-            # Simple conversion
-            records = []
-            for _, row in pandas_df.iterrows():
-                record = {
-                    "session_id": row.get("session_id"),
-                    "user_id": row.get("user_id"),
-                    "track_count": int(row.get("track_count", 0)),
-                    "tracks": row.get("tracks", []) if isinstance(row.get("tracks"), list) else [],
-                    "last_track": row.get("last_track"),
-                    "first_artist": row.get("first_artist"),
-                    "window_start": str(row.get("window.start")) if row.get("window") else None,
-                    "window_end": str(row.get("window.end")) if row.get("window") else None,
-                    "processing_time": str(row.get("processing_time")),
-                    "has_multiple_tracks": bool(row.get("has_multiple_tracks", False))
-                }
-                records.append(record)
-            
-            if records:
-                collection.insert_many(records)
-                logger.info(f"Epoch {epoch_id}: Inserted {len(records)} records")
+            df.write \
+                .format("mongo") \
+                .option("uri", f"{self.mongo_uri}/{self.mongo_db}.{self.mongo_collection}") \
+                .option("replaceDocument", "false") \
+                .mode("append") \
+                .save()
+            logger.info(f"Epoch {epoch_id}: Inserted %d records to MongoDB", df.count())
                 
         except Exception as e:
             logger.error(f"MongoDB write error epoch {epoch_id}: {e}")
@@ -177,6 +197,7 @@ class SimpleMusicRecommender:
                 .option("checkpointLocation", f"{self.checkpoint_location}/main") \
                 .trigger(processingTime='10 seconds') \
                 .start()
+            logger.info("Started MongoDB write stream: %s", query.id)
             
             # Console output for monitoring
             console = processed.select(
@@ -188,8 +209,9 @@ class SimpleMusicRecommender:
                 .outputMode("update") \
                 .format("console") \
                 .option("numRows", 5) \
-                .trigger(processingTime='30 seconds') \
+                .trigger(processingTime='5 seconds') \
                 .start()
+            logger.info("Started console output stream: %s", console.id)
             
             logger.info("Streaming started - waiting for data...")
             query.awaitTermination()
@@ -201,6 +223,7 @@ class SimpleMusicRecommender:
             if self.mongo_client:
                 self.mongo_client.close()
             self.spark.stop()
+            logger.info("Spark streaming stopped")
 
 def main():
     """Main function"""
