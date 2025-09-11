@@ -66,7 +66,9 @@ class SimpleKafkaProducer:
             value_serializer=lambda v: v.encode('utf-8'),
             key_serializer=lambda k: k.encode('utf-8') if k else None,
             retries=3,
-            acks=1
+            acks=1,
+            batch_size=65536,
+            linger_ms=5
         )
         
         # Load tracks from multiple chunks
@@ -278,7 +280,7 @@ class SimpleKafkaProducer:
             logger.error(f"Failed to send event {event.event_id}: {e}")
     
     def start_streaming(self, 
-                       events_per_second: int = 10,
+                       events_per_second: int = 100,
                        duration_minutes: int = None):
         """Start simple streaming"""
         

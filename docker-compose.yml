@@ -95,30 +95,29 @@ services:
           cpus: '0.5'
 
   spark:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: apache/spark:3.5.0-scala2.12-java11-python3-ubuntu
     container_name: music-spark
     environment:
-      - SPARK_MODE=standalone
-      - SPARK_MASTER_URL=local[*]
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=spark
+      - SPARK_MASTER_PORT=7077
       - SPARK_DRIVER_MEMORY=2g
       - SPARK_EXECUTOR_MEMORY=2g
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
-      - PYSPARK_PYTHON=/opt/bitnami/python/bin/python
+      - SPARK_DRIVER_MAX_RESULT_SIZE=1g
+      - PYSPARK_PYTHON=python3
+      - PYTHONPATH=/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip
     ports:
-      - "4040:4040"
-      - "4041:4041"
+      - "4040:4040"  # Spark UI
+      - "7077:7077"  # Spark Master
+      - "8080:8080"  # Spark Master Web UI
     volumes:
       - ./:/app
       - ./spark-logs:/tmp/spark-logs
-      - ./checkpoints:/tmp/checkpoints
-      - ./log4j.properties:/opt/bitnami/spark/conf/log4j.properties  # Add this line
+    working_dir: /app
+    user: root
     command: >
-      bash -c "/opt/bitnami/spark/bin/spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.mongodb.spark:mongo-spark-connector_2.12:3.0.1 /app/src/processing/spark/streaming_processor.py --kafka-servers kafka:29092 --kafka-topic user-tracks --mongo-uri mongodb://admin:password@mongodb:27017 --mongo-db recommendations --mongo-collection user_sessions --checkpoint-location /tmp/checkpoints"
+      bash -c "pip install pymongo pandas numpy && wget -P /opt/spark/jars/ https://repo1.maven.org/maven2/org/apache/spark/spark-sql-kafka-0-10_2.12/3.5.0/spark-sql-kafka-0-10_2.12-3.5.0.jar && wget -P /opt/spark/jars/ https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.4.0/kafka-clients-3.4.0.jar && wget -P /opt/spark/jars/ https://repo1.maven.org/maven2/org/apache/spark/spark-token-provider-kafka-0-10_2.12/3.5.0/spark-token-provider-kafka-0-10_2.12-3.5.0.jar && wget -P /opt/spark/jars/ https://repo1.maven.org/maven2/org/mongodb/spark/mongo-spark-connector_2.12/10.2.0/mongo-spark-connector_2.12-10.2.0.jar && wget -P /opt/spark/jars/ https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar && hash -r && python3 -c 'import pandas; print(\"pandas available\")' && PYSPARK_PYTHON=python3 /opt/spark/bin/spark-submit --master local[*] --driver-memory 2g --executor-memory 2g --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=true --conf spark.streaming.stopGracefullyOnShutdown=true /app/src/processing/spark/streaming_processor.py --kafka-servers kafka:29092 --kafka-topic user-tracks --mongo-uri mongodb://admin:password@mongodb:27017 --mongo-db recommendations --mongo-sessions-collection user_sessions --mongo-recommendations-collection user_recommendations"
+
     networks:
       - music-network
     deploy:
@@ -129,12 +128,6 @@ services:
         reservations:
           memory: 2G
           cpus: '2'
-    healthcheck:
-      test: ["CMD-SHELL", "netstat -tuln | grep 4040"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
     depends_on:
       kafka:
         condition: service_healthy
@@ -147,6 +140,5 @@ networks:
 
 volumes:
   spark-logs:
-  checkpoints:
   mongodb_data:
   kafka-logs:
